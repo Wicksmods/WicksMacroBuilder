@@ -1,4 +1,4 @@
-<p align="center"><img src="images/wick-thumb-macro-builder.png" alt="Wick's Macro Builder"></p>
+<p align="center"><img src="images/wick-thumb-macro.png" alt="Wick's Macro Builder"></p>
 
 # Wick's Macro Builder
 
