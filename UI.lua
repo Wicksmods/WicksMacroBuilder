@@ -24,12 +24,20 @@ local C_ERROR        = { 0.95, 0.35, 0.35, 1 }
 
 local CLASS_COLORS = RAID_CLASS_COLORS
 
-local BRACKET     = 10
-local HEADER_H    = 22
-local TAB_H       = 22
-local FRAME_W     = 580
-local FRAME_H     = 510
-local FRAME_PAD   = 10
+local BRACKET        = 10
+local HEADER_H       = 22
+local TAB_H          = 22
+local FRAME_W        = 580
+local FRAME_H        = 510
+local FRAME_PAD      = 10
+local ICON_STRIP_W   = 80     -- right-side column holding scope toggle + macro icons
+local ICON_STRIP_GAP = 4      -- gap between source/editor content and the icon strip
+-- Distance from frame's right edge where the content area (editor, name row,
+-- save row, mode hint) must stop. Using a BOTTOMRIGHT/-RIGHT_INSET anchor
+-- means content grows with the frame on resize while still leaving room for
+-- the icon strip.
+local RIGHT_INSET    = ICON_STRIP_W + ICON_STRIP_GAP + FRAME_PAD
+local DEFAULT_ICON   = "INV_Misc_QuestionMark"
 
 local SOURCES = {
     "GENERAL",
@@ -48,20 +56,22 @@ local tabs = {}
 local selectedSource = "GENERAL"
 local chipPool = {}
 local presetRowPool = {}
+local iconStripPool = {}
+
+-- Right edge x for source-panel content (chips + preset rows) and editor
+-- section — leaves room for the icon strip on the right.
+local CONTENT_RIGHT_EDGE = FRAME_W - ICON_STRIP_W - ICON_STRIP_GAP
 
 -- State for the editor + save controls.
--- In WoW, macros are a packed list — you can only EDIT an existing macro in
--- place or CREATE a new one (which appends). There is no "reserved slot 5".
--- So state tracks:
---   - scope: which scope (global/per-char) you're browsing + will create in
---   - browseIndex: 1-based index into existing macros of that scope
---   - editingAbsSlot: the absolute slot of the macro currently loaded into
---     the editor. When set, Save calls EditMacro in place. When nil, Save
---     calls CreateMacro (appends new).
+--   scope           : "global" | "char" — which scope new saves go into
+--   editingAbsSlot  : absolute slot of the macro currently loaded in the
+--                     editor (nil = Save creates new, non-nil = Save overwrites)
+--   chosenIcon      : icon to save with the macro. Taken from the macro when
+--                     loaded, picked via the icon popup, or DEFAULT on new.
 local state = {
     scope = "global",
-    browseIndex = 1,
     editingAbsSlot = nil,
+    chosenIcon = DEFAULT_ICON,
 }
 
 -- ============================================================
@@ -87,16 +97,17 @@ local function addInnerBorder(f)
     local r = newTex(f, "BORDER", C_BORDER); r:SetPoint("TOPRIGHT");   r:SetPoint("BOTTOMRIGHT"); r:SetWidth(1)
 end
 
--- Fel-green L-brackets, 10px arms, 2px thick, flush to corners.
--- If resizeButton is provided, the BOTTOMRIGHT bracket is parented to it so
--- the bracket itself acts as the resize grip.
-local function addCorners(f, resizeButton)
-    for _, p in ipairs({ "TOPLEFT", "TOPRIGHT", "BOTTOMLEFT", "BOTTOMRIGHT" }) do
-        local host = (p == "BOTTOMRIGHT" and resizeButton) or f
-        local h = host:CreateTexture(nil, "OVERLAY"); h:SetColorTexture(unpack(C_GREEN))
-        h:SetPoint(p, host, p, 0, 0); h:SetSize(BRACKET, 2)
-        local v = host:CreateTexture(nil, "OVERLAY"); v:SetColorTexture(unpack(C_GREEN))
-        v:SetPoint(p, host, p, 0, 0); v:SetSize(2, BRACKET)
+local function addCorners(f, resizeHost)
+    for _, point in ipairs({ "TOPLEFT", "TOPRIGHT", "BOTTOMLEFT", "BOTTOMRIGHT" }) do
+        local host = (point == "BOTTOMRIGHT" and resizeHost) or f
+        local h = host:CreateTexture(nil, "OVERLAY")
+        h:SetColorTexture(unpack(C_GREEN))
+        h:SetPoint(point, host, point, 0, 0)
+        h:SetSize(BRACKET, 2)
+        local v = host:CreateTexture(nil, "OVERLAY")
+        v:SetColorTexture(unpack(C_GREEN))
+        v:SetPoint(point, host, point, 0, 0)
+        v:SetSize(2, BRACKET)
     end
 end
 
@@ -111,7 +122,6 @@ end
 
 local function setTextColor(fs, c) fs:SetTextColor(c[1], c[2], c[3], c[4] or 1) end
 
--- Bordered button with label
 local function makeButton(parent, label, width, height)
     local b = CreateFrame("Button", nil, parent)
     b:SetSize(width or 80, height or 22)
@@ -125,14 +135,14 @@ local function makeButton(parent, label, width, height)
 end
 
 -- ============================================================
--- Chip width measurement
--- ------------------------------------------------------------
--- A chip's FontString is anchored LEFT+RIGHT inside the chip — calling
--- GetStringWidth on it can return a clamped/zero value on first render
--- (before WoW has finalized the parent frame's width), which produces
--- overlapping chips. Use a dedicated unanchored FontString so widths
--- are always the intrinsic text width.
+-- The editor (multi-line EditBox inside a ScrollFrame)
 -- ============================================================
+local editBox, editScroll, charCount, nameEdit, iconPickerBtn
+local scopeButtons = {}          -- { [scope] = button } — scope toggle at top of icon strip
+local flashStatus                -- set inside buildEditorPanel, used by refreshIconList etc.
+
+-- Measurement FontString for chip widths (unanchored so GetStringWidth returns
+-- intrinsic text width, not a width-constrained wrap).
 local _measureFS
 local _widthCache = {}
 local function measureChipWidth(label)
@@ -144,17 +154,10 @@ local function measureChipWidth(label)
         _measureFS:Hide()
     end
     _measureFS:SetText(label)
-    -- Bigger pad (+20) than strict (text+12 = text + LEFT inset + RIGHT inset)
-    -- to absorb any rendering discrepancy between measureFS and chip.text.
     local w = math.max(44, math.ceil(_measureFS:GetStringWidth()) + 20)
     _widthCache[label] = w
     return w
 end
-
--- ============================================================
--- The editor (multi-line EditBox inside a ScrollFrame)
--- ============================================================
-local editBox, editScroll, charCount, nameEdit, slotLabel, scopeCbs
 
 local function updateCharCount()
     if not editBox or not charCount then return end
@@ -177,7 +180,7 @@ local function insertAtCursor(text)
 end
 
 -- ============================================================
--- Chip (small clickable button that inserts a snippet)
+-- Chip (clickable snippet button)
 -- ============================================================
 local function getChip(i)
     if chipPool[i] then return chipPool[i] end
@@ -207,11 +210,10 @@ local function getChip(i)
     return b
 end
 
--- Wraps chips left-to-right in a parent, returns final Y offset used (negative from top).
 local function layoutChips(startIndex, items, topY, parentRightEdge, color)
     local x = FRAME_PAD
     local y = topY
-    local rowH = 22 -- includes vertical gap
+    local rowH = 22
     for i, item in ipairs(items) do
         local chip = getChip(startIndex + i - 1)
         chip.label = item.label
@@ -237,7 +239,7 @@ local function layoutChips(startIndex, items, topY, parentRightEdge, color)
 end
 
 -- ============================================================
--- Preset row (for class tabs)
+-- Preset row (class tabs)
 -- ============================================================
 local function getPresetRow(i)
     if presetRowPool[i] then return presetRowPool[i] end
@@ -254,20 +256,22 @@ local function getPresetRow(i)
     return row
 end
 
--- ============================================================
--- Source content — renders the upper panel for the selected tab.
--- Returns the Y offset (negative from frame top) where the upper panel ends.
--- ============================================================
-local SOURCE_TOP = HEADER_H + TAB_H * 2 + 6   -- below the 2-row tab strip
+local SOURCE_TOP = HEADER_H + TAB_H * 2 + 6
 
 local function hideAllChips()
     for _, c in ipairs(chipPool) do c:Hide() end
     for _, r in ipairs(presetRowPool) do r:Hide() end
 end
 
+-- Returns the current content right-edge x (in pixels from frame's left).
+-- Re-evaluated on each render so chips + preset rows reflow on resize.
+local function contentRightEdge()
+    local fw = frame and frame:GetWidth() or FRAME_W
+    return fw - ICON_STRIP_W - ICON_STRIP_GAP
+end
+
 local function renderGeneralSource()
     hideAllChips()
-    -- Section 1: Conditionals
     local header1 = frame.sourceHeader1
     header1:SetText("Conditionals")
     header1:Show()
@@ -275,11 +279,10 @@ local function renderGeneralSource()
     header1:SetPoint("TOPLEFT", frame, "TOPLEFT", FRAME_PAD, -(SOURCE_TOP + 2))
 
     local y = -(SOURCE_TOP + 18)
-    local rightEdge = frame:GetWidth()
+    local rightEdge = contentRightEdge()
     local nextIdx = 1
     y, nextIdx = layoutChips(nextIdx, ns.CONDITIONALS, y, rightEdge, C_GREEN)
 
-    -- Gap + Section 2: Commands
     y = y - 4
     local header2 = frame.sourceHeader2
     header2:SetText("Commands")
@@ -305,7 +308,10 @@ local function renderClassSource(class)
         local row = getPresetRow(i)
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", frame, "TOPLEFT", FRAME_PAD, y)
-        row:SetPoint("RIGHT", frame, "RIGHT", -FRAME_PAD, 0)
+        -- Preset row ends at the current content right edge (before the icon
+        -- strip). Uses -RIGHT_INSET so it tracks the frame on resize.
+        row:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -RIGHT_INSET, y)
+        row:SetHeight(22)
         row.nameText:SetText(preset.name)
         row.hintText:SetText(preset.hint or "")
         row:SetScript("OnClick", function()
@@ -315,10 +321,13 @@ local function renderClassSource(class)
                 editBox:SetCursorPosition(#(preset.body or ""))
                 updateCharCount()
             end
-            -- Loading a preset is a NEW-macro intent. Clear any prior edit target
-            -- so Save creates a new macro instead of overwriting something else.
+            -- Loading a preset = new-macro intent. Clear edit target and reset
+            -- the chosen icon to the default ? (user can pick one before save).
             state.editingAbsSlot = nil
+            state.chosenIcon = DEFAULT_ICON
             if frame.updateModeHint then frame.updateModeHint() end
+            if frame.updateCurrentIconBtn then frame.updateCurrentIconBtn() end
+            if frame.refreshIconList then frame.refreshIconList() end
             if frame.statusText then
                 frame.statusText:SetText("Preset loaded. Save will create a new macro.")
                 setTextColor(frame.statusText, C_TEXT_DIM)
@@ -391,12 +400,278 @@ local function refreshTabVisuals()
 end
 
 -- ============================================================
--- Editor + save panel
+-- Icon picker popup (opened from the name-row "current icon" button)
 -- ============================================================
--- Positioned in the bottom portion of the frame, stacked upward from the bottom.
-local EDITOR_BOTTOM = 10        -- gap from frame bottom
+local iconPicker
+local function ensureIconPicker()
+    if iconPicker then return iconPicker end
+    iconPicker = CreateFrame("Frame", "WICKSMACROBUILDERIconPicker", UIParent)
+    iconPicker:SetSize(336, 420)
+    iconPicker:SetPoint("CENTER")
+    iconPicker:SetFrameStrata("TOOLTIP")
+    iconPicker:SetMovable(true)
+    iconPicker:EnableMouse(true)
+    iconPicker:RegisterForDrag("LeftButton")
+    iconPicker:SetScript("OnDragStart", iconPicker.StartMoving)
+    iconPicker:SetScript("OnDragStop", iconPicker.StopMovingOrSizing)
+
+    local bg = newTex(iconPicker, "BACKGROUND", C_BG); bg:SetAllPoints()
+    addBorder(iconPicker)
+
+    -- Header
+    local h = newTex(iconPicker, "ARTWORK", C_HEADER_BG)
+    h:SetPoint("TOPLEFT", 1, -1); h:SetPoint("TOPRIGHT", -1, -1); h:SetHeight(HEADER_H)
+    local t = newText(iconPicker, 12, C_TEXT_NORMAL)
+    t:SetPoint("LEFT", iconPicker, "TOPLEFT", 10, -HEADER_H/2)
+    t:SetText("Choose Icon")
+
+    local closeBtn = CreateFrame("Button", nil, iconPicker)
+    closeBtn:SetSize(HEADER_H-4, HEADER_H-4)
+    closeBtn:SetPoint("RIGHT", iconPicker, "TOPRIGHT", -4, -HEADER_H/2)
+    local closeText = newText(closeBtn, 14, C_TEXT_NORMAL); closeText:SetPoint("CENTER"); closeText:SetText("×")
+    closeBtn:SetScript("OnClick", function() iconPicker:Hide() end)
+
+    iconPicker:SetScript("OnKeyDown", function(self, key)
+        if key == "ESCAPE" then self:Hide() end
+    end)
+    iconPicker:EnableKeyboard(true)
+
+    -- Scrollable icon grid
+    local scroll = CreateFrame("ScrollFrame", nil, iconPicker, "UIPanelScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", 8, -(HEADER_H + 6))
+    scroll:SetPoint("BOTTOMRIGHT", -28, 8)
+
+    local child = CreateFrame("Frame", nil, scroll)
+    child:SetSize(300, 1)   -- width will track scroll, height set after populate
+    scroll:SetScrollChild(child)
+
+    local icons = {}
+    if GetMacroIcons then GetMacroIcons(icons) end
+    if GetMacroItemIcons then GetMacroItemIcons(icons) end
+
+    local COLS = 8
+    local ICON_SIZE = 32
+    local PAD = 2
+    local rows = math.ceil(#icons / COLS)
+    child:SetHeight(math.max(1, rows * (ICON_SIZE + PAD) + PAD))
+
+    for i, iconRef in ipairs(icons) do
+        local col = (i-1) % COLS
+        local row = math.floor((i-1) / COLS)
+        local b = CreateFrame("Button", nil, child)
+        b:SetSize(ICON_SIZE, ICON_SIZE)
+        b:SetPoint("TOPLEFT", PAD + col * (ICON_SIZE + PAD), -PAD - row * (ICON_SIZE + PAD))
+        local tex = b:CreateTexture(nil, "ARTWORK")
+        tex:SetAllPoints()
+        tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        -- iconRef is a fileID (number) in modern clients, bare name in older.
+        -- SetTexture accepts both. For bare-name strings we prepend the path.
+        if type(iconRef) == "number" then
+            tex:SetTexture(iconRef)
+        else
+            tex:SetTexture("Interface\\Icons\\" .. iconRef)
+        end
+        b.iconRef = iconRef
+        b:SetScript("OnClick", function(self)
+            state.chosenIcon = self.iconRef
+            if frame and frame.updateCurrentIconBtn then frame.updateCurrentIconBtn() end
+            iconPicker:Hide()
+        end)
+        b:SetScript("OnEnter", function(self)
+            self:SetBackdropBorderColor(unpack(C_GREEN))  -- no-op if no backdrop; harmless
+        end)
+    end
+
+    iconPicker:Hide()
+    return iconPicker
+end
+
+local function setIconTextureOn(tex, iconRef)
+    if type(iconRef) == "number" then
+        tex:SetTexture(iconRef)
+    elseif type(iconRef) == "string" and iconRef ~= "" then
+        if iconRef:find("\\") or iconRef:find("/") then
+            tex:SetTexture(iconRef)
+        else
+            tex:SetTexture("Interface\\Icons\\" .. iconRef)
+        end
+    else
+        tex:SetTexture("Interface\\Icons\\" .. DEFAULT_ICON)
+    end
+end
+
+-- ============================================================
+-- Icon strip (right side of frame below tab strip)
+-- ============================================================
+-- Populated lazily; refreshIconList enumerates existing macros in the current
+-- scope and creates / reuses buttons to show them. Each button:
+--   • shows the macro's stored icon (fileID or texture name)
+--   • Click   → load macro into editor (sets editingAbsSlot, chosenIcon)
+--   • Drag    → PickupMacro(absSlot) so you can drop onto an action bar
+local iconStripScroll, iconStripChild
+local ICON_CELL = 40
+local ICON_GAP  = 4
+
+local refreshIconList  -- forward decl
+
+local function getIconStripBtn(i)
+    if iconStripPool[i] then return iconStripPool[i] end
+    local b = CreateFrame("Button", nil, iconStripChild)
+    b:SetSize(ICON_CELL, ICON_CELL)
+    b:RegisterForClicks("LeftButtonUp")
+    b:RegisterForDrag("LeftButton")
+
+    local bg = newTex(b, "BACKGROUND", C_INPUT_BG); bg:SetAllPoints()
+    addInnerBorder(b)
+
+    local tex = b:CreateTexture(nil, "ARTWORK")
+    tex:SetPoint("TOPLEFT", 2, -2); tex:SetPoint("BOTTOMRIGHT", -2, 2)
+    tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    b.tex = tex
+
+    -- Fel-green selection highlight (shown when this is the loaded macro).
+    local hl = newTex(b, "OVERLAY")
+    hl:SetColorTexture(C_GREEN[1], C_GREEN[2], C_GREEN[3], 0.25)
+    hl:SetPoint("TOPLEFT", 1, -1); hl:SetPoint("BOTTOMRIGHT", -1, 1)
+    hl:Hide()
+    b.highlight = hl
+
+    b:SetScript("OnClick", function(self)
+        if not self.absSlot then return end
+        local abs, name, icon, body = ns.MacroAPI:GetByBrowse(state.scope, self.browseIndex)
+        if not abs then return end
+        if nameEdit then nameEdit:SetText(name) end
+        if editBox then
+            editBox:SetText(body or "")
+            editBox:SetCursorPosition(#(body or ""))
+            updateCharCount()
+        end
+        state.editingAbsSlot = abs
+        state.chosenIcon = icon or DEFAULT_ICON
+        if frame.updateModeHint then frame.updateModeHint() end
+        if frame.updateCurrentIconBtn then frame.updateCurrentIconBtn() end
+        if refreshIconList then refreshIconList() end
+        if flashStatus then flashStatus(("Loaded: %s"):format(name), C_GREEN) end
+    end)
+
+    b:SetScript("OnDragStart", function(self)
+        if InCombatLockdown() then
+            if flashStatus then flashStatus("Cannot drag macros in combat.", C_WARN) end
+            return
+        end
+        if self.absSlot then
+            PickupMacro(self.absSlot)
+        end
+    end)
+
+    b:SetScript("OnEnter", function(self)
+        if not self.macroName then return end
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:AddLine(self.macroName, 1, 0.9, 0.6)
+        GameTooltip:AddLine(("Slot %d"):format(self.absSlot or 0), 0.7, 0.7, 0.7)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Click to load · Drag to action bar", 0.5, 0.8, 0.5)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    iconStripPool[i] = b
+    return b
+end
+
+refreshIconList = function()
+    if not iconStripChild then return end
+    local scope = state.scope
+    local count = ns.MacroAPI:CountScope(scope)
+    local totalH = ICON_GAP + count * (ICON_CELL + ICON_GAP)
+    iconStripChild:SetHeight(math.max(1, totalH))
+
+    for i = 1, count do
+        local abs, name, icon = ns.MacroAPI:GetByBrowse(scope, i)
+        local btn = getIconStripBtn(i)
+        btn.absSlot    = abs
+        btn.browseIndex = i
+        btn.macroName  = name
+        setIconTextureOn(btn.tex, icon)
+        btn:ClearAllPoints()
+        btn:SetPoint("TOP", iconStripChild, "TOP", 0, -(ICON_GAP + (i-1) * (ICON_CELL + ICON_GAP)))
+        if state.editingAbsSlot and state.editingAbsSlot == abs then
+            btn.highlight:Show()
+        else
+            btn.highlight:Hide()
+        end
+        btn:Show()
+    end
+    for i = count + 1, #iconStripPool do iconStripPool[i]:Hide() end
+end
+
+local function buildIconStrip()
+    -- Container
+    local strip = CreateFrame("Frame", nil, frame)
+    strip:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -FRAME_PAD/2, -(HEADER_H + TAB_H*2 + 6))
+    strip:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -FRAME_PAD/2, FRAME_PAD/2)
+    strip:SetWidth(ICON_STRIP_W - FRAME_PAD/2)
+    local stripBg = newTex(strip, "BACKGROUND", C_HEADER_BG); stripBg:SetAllPoints()
+    addInnerBorder(strip)
+
+    -- Scope toggle: two buttons side-by-side at the top of the strip.
+    local SCOPE_BTN_W = math.floor((ICON_STRIP_W - FRAME_PAD/2 - 12 - 4) / 2)
+    local SCOPE_BTN_H = 20
+    local scopeRow = CreateFrame("Frame", nil, strip)
+    scopeRow:SetPoint("TOPLEFT", 6, -6)
+    scopeRow:SetPoint("TOPRIGHT", -6, -6)
+    scopeRow:SetHeight(SCOPE_BTN_H)
+
+    local function makeScopeBtn(label, scope)
+        local b = makeButton(scopeRow, label, SCOPE_BTN_W, SCOPE_BTN_H)
+        b.text:SetFont("Fonts\\FRIZQT__.TTF", 9, "")
+        b.scope = scope
+        b:SetScript("OnClick", function()
+            if state.scope == scope then return end
+            state.scope = scope
+            state.editingAbsSlot = nil
+            state.chosenIcon = DEFAULT_ICON
+            if frame.updateScopeVisuals then frame.updateScopeVisuals() end
+            if frame.updateModeHint then frame.updateModeHint() end
+            if frame.updateCurrentIconBtn then frame.updateCurrentIconBtn() end
+            refreshIconList()
+        end)
+        scopeButtons[scope] = b
+        return b
+    end
+    local btnGlobal = makeScopeBtn("Global", "global")
+    btnGlobal:SetPoint("LEFT", 0, 0)
+    local btnChar   = makeScopeBtn("Char", "char")
+    btnChar:SetPoint("LEFT", btnGlobal, "RIGHT", 4, 0)
+
+    -- Scrollable icon list
+    iconStripScroll = CreateFrame("ScrollFrame", nil, strip, "UIPanelScrollFrameTemplate")
+    iconStripScroll:SetPoint("TOPLEFT", 6, -(SCOPE_BTN_H + 10))
+    iconStripScroll:SetPoint("BOTTOMRIGHT", -22, 6)
+    iconStripChild = CreateFrame("Frame", nil, iconStripScroll)
+    iconStripChild:SetSize(ICON_STRIP_W - FRAME_PAD/2 - 24, 1)
+    iconStripScroll:SetScrollChild(iconStripChild)
+
+    local function updateScopeVisuals()
+        for scope, btn in pairs(scopeButtons) do
+            if state.scope == scope then
+                btn.bg:SetColorTexture(C_TAB_BG_SEL[1], C_TAB_BG_SEL[2], C_TAB_BG_SEL[3], 1)
+                btn.text:SetTextColor(C_GREEN[1], C_GREEN[2], C_GREEN[3], 1)
+            else
+                btn.bg:SetColorTexture(C_TAB_BG[1], C_TAB_BG[2], C_TAB_BG[3], 1)
+                btn.text:SetTextColor(C_TEXT_NORMAL[1], C_TEXT_NORMAL[2], C_TEXT_NORMAL[3], 1)
+            end
+        end
+    end
+    frame.updateScopeVisuals = updateScopeVisuals
+    frame.refreshIconList    = refreshIconList
+end
+
+-- ============================================================
+-- Editor + save panel (bottom of frame, left of icon strip)
+-- ============================================================
+local EDITOR_BOTTOM = 10
 local SAVE_ROW_H    = 24
-local SLOT_ROW_H    = 24
 local EDITOR_H      = 96
 local NAME_ROW_H    = 24
 
@@ -405,78 +680,113 @@ local function buildEditorPanel()
     local saveRow = CreateFrame("Frame", nil, frame)
     saveRow:SetHeight(SAVE_ROW_H)
     saveRow:SetPoint("BOTTOMLEFT",  FRAME_PAD, EDITOR_BOTTOM)
-    saveRow:SetPoint("BOTTOMRIGHT", -FRAME_PAD, EDITOR_BOTTOM)
+    saveRow:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -RIGHT_INSET, EDITOR_BOTTOM)
 
-    local saveBtn = makeButton(saveRow, "Save to Slot", 100, SAVE_ROW_H)
+    local saveBtn = makeButton(saveRow, "Save to Slot", 110, SAVE_ROW_H)
     saveBtn.text:SetTextColor(C_GREEN[1], C_GREEN[2], C_GREEN[3], 1)
     saveBtn:SetPoint("RIGHT", 0, 0)
 
     local deleteBtn = makeButton(saveRow, "Delete", 70, SAVE_ROW_H)
     deleteBtn:SetPoint("RIGHT", saveBtn, "LEFT", -6, 0)
 
-    local loadBtn = makeButton(saveRow, "Load from Slot", 110, SAVE_ROW_H)
-    loadBtn:SetPoint("RIGHT", deleteBtn, "LEFT", -6, 0)
-
     local newBtn = makeButton(saveRow, "Clear", 60, SAVE_ROW_H)
     newBtn:SetPoint("LEFT", 0, 0)
 
-    -- Slot/scope row (above save row)
-    local slotRow = CreateFrame("Frame", nil, frame)
-    slotRow:SetHeight(SLOT_ROW_H)
-    slotRow:SetPoint("BOTTOMLEFT",  FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H + 4)
-    slotRow:SetPoint("BOTTOMRIGHT", -FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H + 4)
+    -- Editor
+    local editFrame = CreateFrame("Frame", nil, frame)
+    editFrame:SetHeight(EDITOR_H)
+    editFrame:SetPoint("BOTTOMLEFT",  FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H + 8)
+    editFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -RIGHT_INSET, EDITOR_BOTTOM + SAVE_ROW_H + 8)
+    local eBg = newTex(editFrame, "BACKGROUND", C_INPUT_BG); eBg:SetAllPoints()
+    addInnerBorder(editFrame)
 
-    local function makeRadio(parent, label, scope)
-        local r = CreateFrame("Button", nil, parent)
-        r:SetSize(16, 16)
-        local bg = newTex(r, "BACKGROUND", C_INPUT_BG); bg:SetAllPoints()
-        addInnerBorder(r)
-        local dot = newTex(r, "ARTWORK", C_GREEN)
-        dot:SetPoint("TOPLEFT", 3, -3); dot:SetPoint("BOTTOMRIGHT", -3, 3); dot:Hide()
-        r.dot = dot
-        r.scope = scope
-        local t = newText(parent, 11, C_TEXT_NORMAL); t:SetPoint("LEFT", r, "RIGHT", 4, 0); t:SetText(label)
-        r.label = t
-        return r
-    end
+    editScroll = CreateFrame("ScrollFrame", "WICKSMACROBUILDEREditorScroll", editFrame, "UIPanelScrollFrameTemplate")
+    editScroll:SetPoint("TOPLEFT", 6, -6)
+    editScroll:SetPoint("BOTTOMRIGHT", -24, 6)
 
-    local radioGlobal = makeRadio(slotRow, "Global", "global")
-    radioGlobal:SetPoint("LEFT", 0, 0)
-    local radioChar = makeRadio(slotRow, "Per-Character", "char")
-    radioChar:SetPoint("LEFT", radioGlobal.label, "RIGHT", 14, 0)
+    editBox = CreateFrame("EditBox", nil, editScroll)
+    editBox:SetMultiLine(true)
+    editBox:SetMaxLetters(255)
+    editBox:SetAutoFocus(false)
+    editBox:SetFontObject("ChatFontNormal")
+    editBox:SetTextInsets(0, 0, 0, 0)
+    editBox:SetWidth(CONTENT_RIGHT_EDGE - 2 * FRAME_PAD - 32)
+    editBox:SetHeight(EDITOR_H - 12)
+    editBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    editBox:SetScript("OnTextChanged", function() updateCharCount() end)
+    editBox:SetTextColor(C_TEXT_NORMAL[1], C_TEXT_NORMAL[2], C_TEXT_NORMAL[3], 1)
+    editScroll:SetScrollChild(editBox)
 
-    scopeCbs = { radioGlobal, radioChar }
+    charCount = newText(frame, 10, C_GREEN, "RIGHT")
+    charCount:SetPoint("BOTTOMRIGHT", editFrame, "TOPRIGHT", 0, 2)
+    charCount:SetText("0/255")
 
-    -- Slot prev/current/next widget
-    local slotBtn = CreateFrame("Frame", nil, slotRow)
-    slotBtn:SetSize(180, SLOT_ROW_H)
-    slotBtn:SetPoint("LEFT", radioChar.label, "RIGHT", 24, 0)
+    -- Name row: Name label + name editbox + current-icon button
+    local nameRow = CreateFrame("Frame", nil, frame)
+    nameRow:SetHeight(NAME_ROW_H)
+    nameRow:SetPoint("BOTTOMLEFT",  FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H + EDITOR_H + 12)
+    nameRow:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -RIGHT_INSET, EDITOR_BOTTOM + SAVE_ROW_H + EDITOR_H + 12)
 
-    local slotPrev = makeButton(slotBtn, "◄", 20, SLOT_ROW_H)
-    slotPrev:SetPoint("LEFT", 0, 0)
+    local nameLbl = newText(nameRow, 11, C_TEXT_NORMAL); nameLbl:SetPoint("LEFT", 0, 0); nameLbl:SetText("Name:")
 
-    slotLabel = CreateFrame("Frame", nil, slotBtn)
-    slotLabel:SetSize(140, SLOT_ROW_H)
-    slotLabel:SetPoint("LEFT", slotPrev, "RIGHT", 4, 0)
-    local slLabBg = newTex(slotLabel, "BACKGROUND", C_INPUT_BG); slLabBg:SetAllPoints()
-    addInnerBorder(slotLabel)
-    local slText = newText(slotLabel, 11, C_TEXT_NORMAL); slText:SetPoint("CENTER"); slText:SetText("1: (empty)")
-    slotLabel.text = slText
+    local nameFrame = CreateFrame("Frame", nil, nameRow)
+    nameFrame:SetSize(180, NAME_ROW_H - 2)
+    nameFrame:SetPoint("LEFT", nameLbl, "RIGHT", 6, 0)
+    local nBg = newTex(nameFrame, "BACKGROUND", C_INPUT_BG); nBg:SetAllPoints()
+    addInnerBorder(nameFrame)
 
-    local slotNext = makeButton(slotBtn, "►", 20, SLOT_ROW_H)
-    slotNext:SetPoint("LEFT", slotLabel, "RIGHT", 4, 0)
+    nameEdit = CreateFrame("EditBox", nil, nameFrame)
+    nameEdit:SetPoint("TOPLEFT", 6, -2); nameEdit:SetPoint("BOTTOMRIGHT", -6, 2)
+    nameEdit:SetAutoFocus(false)
+    nameEdit:SetFontObject("ChatFontNormal")
+    nameEdit:SetMaxLetters(16)
+    nameEdit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    nameEdit:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+    nameEdit:SetTextColor(C_TEXT_NORMAL[1], C_TEXT_NORMAL[2], C_TEXT_NORMAL[3], 1)
 
-    local function updatePickerLabel()
-        local count = ns.MacroAPI:CountScope(state.scope)
-        if count == 0 then
-            slText:SetText("(no macros in this scope)")
-            return
+    -- Current-icon button — click to open icon picker.
+    iconPickerBtn = CreateFrame("Button", nil, nameRow)
+    iconPickerBtn:SetSize(NAME_ROW_H - 2, NAME_ROW_H - 2)
+    iconPickerBtn:SetPoint("LEFT", nameFrame, "RIGHT", 6, 0)
+    local ipBg = newTex(iconPickerBtn, "BACKGROUND", C_INPUT_BG); ipBg:SetAllPoints()
+    addInnerBorder(iconPickerBtn)
+    local ipTex = iconPickerBtn:CreateTexture(nil, "ARTWORK")
+    ipTex:SetPoint("TOPLEFT", 2, -2); ipTex:SetPoint("BOTTOMRIGHT", -2, 2)
+    ipTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    iconPickerBtn.tex = ipTex
+    iconPickerBtn:SetScript("OnClick", function()
+        ensureIconPicker():Show()
+    end)
+    iconPickerBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOPLEFT")
+        GameTooltip:AddLine("Macro icon", 1, 0.9, 0.6)
+        GameTooltip:AddLine("Click to choose a different icon.", 0.9, 0.9, 0.9, true)
+        GameTooltip:Show()
+    end)
+    iconPickerBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    local function updateCurrentIconBtn()
+        if iconPickerBtn and iconPickerBtn.tex then
+            setIconTextureOn(iconPickerBtn.tex, state.chosenIcon or DEFAULT_ICON)
         end
-        if state.browseIndex < 1 then state.browseIndex = 1 end
-        if state.browseIndex > count then state.browseIndex = count end
-        local _, name = ns.MacroAPI:GetByBrowse(state.scope, state.browseIndex)
-        slText:SetText(("%d/%d: %s"):format(state.browseIndex, count, name or "?"))
     end
+    frame.updateCurrentIconBtn = updateCurrentIconBtn
+
+    -- Status message (right of name row)
+    local statusText = newText(nameRow, 10, C_TEXT_DIM, "RIGHT")
+    statusText:SetPoint("RIGHT", 0, 0); statusText:SetPoint("LEFT", iconPickerBtn, "RIGHT", 12, 0)
+    frame.statusText = statusText
+
+    flashStatus = function(msg, color)
+        statusText:SetText(msg or "")
+        setTextColor(statusText, color or C_TEXT_DIM)
+    end
+
+    -- Mode hint strip (sits just above the save row)
+    frame.modeHint = newText(frame, 10, C_TEXT_DIM, "LEFT")
+    frame.modeHint:SetPoint("BOTTOMLEFT", FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H)
+    frame.modeHint:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -RIGHT_INSET, EDITOR_BOTTOM + SAVE_ROW_H)
+    frame.modeHint:SetText("No macro loaded — Save creates a new one.")
 
     local function updateModeHint()
         if not frame.modeHint then return end
@@ -491,134 +801,22 @@ local function buildEditorPanel()
             saveBtn.text:SetText("Create New")
         end
     end
-
-    local function updateScopeVisuals()
-        for _, r in ipairs(scopeCbs) do
-            if r.scope == state.scope then r.dot:Show() else r.dot:Hide() end
-        end
-        updatePickerLabel()
-    end
-
-    local function onScopeChange(newScope)
-        state.scope = newScope
-        state.browseIndex = 1
-        -- Toggling scope is a "I want my next save to go here" intent. Any
-        -- stale edit target from the other scope should be dropped so Save
-        -- falls back to Create New in the new scope.
-        state.editingAbsSlot = nil
-        updateScopeVisuals()
-        updateModeHint()
-    end
-    radioGlobal:SetScript("OnClick", function() onScopeChange("global") end)
-    radioChar:SetScript("OnClick", function() onScopeChange("char") end)
-    slotPrev:SetScript("OnClick", function()
-        local count = ns.MacroAPI:CountScope(state.scope)
-        if count == 0 then return end
-        state.browseIndex = state.browseIndex - 1
-        if state.browseIndex < 1 then state.browseIndex = count end
-        updatePickerLabel()
-    end)
-    slotNext:SetScript("OnClick", function()
-        local count = ns.MacroAPI:CountScope(state.scope)
-        if count == 0 then return end
-        state.browseIndex = state.browseIndex + 1
-        if state.browseIndex > count then state.browseIndex = 1 end
-        updatePickerLabel()
-    end)
-
-    frame.updatePickerLabel = updatePickerLabel
     frame.updateModeHint = updateModeHint
-    frame.updateScopeVisuals = updateScopeVisuals
-
-    -- Editor (above slot row)
-    local editFrame = CreateFrame("Frame", nil, frame)
-    editFrame:SetHeight(EDITOR_H)
-    editFrame:SetPoint("BOTTOMLEFT",  FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H + SLOT_ROW_H + 8)
-    editFrame:SetPoint("BOTTOMRIGHT", -FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H + SLOT_ROW_H + 8)
-    local eBg = newTex(editFrame, "BACKGROUND", C_INPUT_BG); eBg:SetAllPoints()
-    addInnerBorder(editFrame)
-
-    editScroll = CreateFrame("ScrollFrame", "WICKSMACROBUILDEREditorScroll", editFrame, "UIPanelScrollFrameTemplate")
-    editScroll:SetPoint("TOPLEFT", 6, -6)
-    editScroll:SetPoint("BOTTOMRIGHT", -24, 6)
-
-    editBox = CreateFrame("EditBox", nil, editScroll)
-    editBox:SetMultiLine(true)
-    editBox:SetMaxLetters(255)
-    editBox:SetAutoFocus(false)
-    editBox:SetFontObject("ChatFontNormal")
-    editBox:SetTextInsets(0, 0, 0, 0)
-    editBox:SetWidth(frame:GetWidth() - 2 * FRAME_PAD - 32)
-    editBox:SetHeight(EDITOR_H - 12)
-    editBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    editBox:SetScript("OnTextChanged", function() updateCharCount() end)
-    editBox:SetTextColor(C_TEXT_NORMAL[1], C_TEXT_NORMAL[2], C_TEXT_NORMAL[3], 1)
-    editScroll:SetScrollChild(editBox)
-
-    charCount = newText(frame, 10, C_GREEN, "RIGHT")
-    charCount:SetPoint("BOTTOMRIGHT", editFrame, "TOPRIGHT", 0, 2)
-    charCount:SetText("0/255")
-
-    -- Name row (above editor)
-    local nameRow = CreateFrame("Frame", nil, frame)
-    nameRow:SetHeight(NAME_ROW_H)
-    nameRow:SetPoint("BOTTOMLEFT",  FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H + SLOT_ROW_H + EDITOR_H + 12)
-    nameRow:SetPoint("BOTTOMRIGHT", -FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H + SLOT_ROW_H + EDITOR_H + 12)
-
-    local nameLbl = newText(nameRow, 11, C_TEXT_NORMAL); nameLbl:SetPoint("LEFT", 0, 0); nameLbl:SetText("Name:")
-
-    local nameFrame = CreateFrame("Frame", nil, nameRow)
-    nameFrame:SetSize(200, NAME_ROW_H - 2)
-    nameFrame:SetPoint("LEFT", nameLbl, "RIGHT", 6, 0)
-    local nBg = newTex(nameFrame, "BACKGROUND", C_INPUT_BG); nBg:SetAllPoints()
-    addInnerBorder(nameFrame)
-
-    nameEdit = CreateFrame("EditBox", nil, nameFrame)
-    nameEdit:SetPoint("TOPLEFT", 6, -2); nameEdit:SetPoint("BOTTOMRIGHT", -6, 2)
-    nameEdit:SetAutoFocus(false)
-    nameEdit:SetFontObject("ChatFontNormal")
-    nameEdit:SetMaxLetters(16)
-    nameEdit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    nameEdit:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-    nameEdit:SetTextColor(C_TEXT_NORMAL[1], C_TEXT_NORMAL[2], C_TEXT_NORMAL[3], 1)
-
-    -- Status message (right of name row)
-    local statusText = newText(nameRow, 10, C_TEXT_DIM, "RIGHT")
-    statusText:SetPoint("RIGHT", 0, 0); statusText:SetPoint("LEFT", nameFrame, "RIGHT", 12, 0)
-    frame.statusText = statusText
-
-    local function flashStatus(msg, color)
-        statusText:SetText(msg or "")
-        setTextColor(statusText, color or C_TEXT_DIM)
-    end
 
     -- Wire buttons
     newBtn:SetScript("OnClick", function()
         editBox:SetText("")
         nameEdit:SetText("")
         state.editingAbsSlot = nil
+        state.chosenIcon = DEFAULT_ICON
         updateCharCount()
         updateModeHint()
+        updateCurrentIconBtn()
+        if refreshIconList then refreshIconList() end
         flashStatus("Editor cleared. Save will create a new macro.", C_TEXT_DIM)
     end)
 
-    loadBtn:SetScript("OnClick", function()
-        local abs, name, icon, body = ns.MacroAPI:GetByBrowse(state.scope, state.browseIndex)
-        if not abs then
-            flashStatus("Nothing to load in this scope.", C_WARN); return
-        end
-        nameEdit:SetText(name)
-        editBox:SetText(body or "")
-        editBox:SetCursorPosition(#(body or ""))
-        WICKSMACROBUILDERDB.lastIcon = icon or "INV_Misc_QuestionMark"
-        state.editingAbsSlot = abs
-        updateCharCount()
-        updateModeHint()
-        flashStatus(("Loaded: %s (slot %d)"):format(name, abs), C_GREEN)
-    end)
-
-    -- Delete requires confirmation via StaticPopup so a mis-click doesn't
-    -- nuke a macro. Popup body substitutes %s with the macro name.
+    -- Delete requires confirmation so a mis-click doesn't nuke a macro.
     StaticPopupDialogs["WSMB_CONFIRM_DELETE"] = {
         text = "Delete macro '%s'?\n\nThis cannot be undone.",
         button1 = DELETE or "Delete",
@@ -628,11 +826,16 @@ local function buildEditorPanel()
             local deletedName = GetMacroInfo(data.abs)
             local ok, err = ns.MacroAPI:DeleteAt(data.abs)
             if ok then
-                if state.editingAbsSlot == data.abs then state.editingAbsSlot = nil end
-                local count = ns.MacroAPI:CountScope(state.scope)
-                if state.browseIndex > count then state.browseIndex = math.max(1, count) end
-                updatePickerLabel()
+                if state.editingAbsSlot == data.abs then
+                    state.editingAbsSlot = nil
+                    state.chosenIcon = DEFAULT_ICON
+                    editBox:SetText("")
+                    nameEdit:SetText("")
+                    updateCharCount()
+                end
                 updateModeHint()
+                updateCurrentIconBtn()
+                if refreshIconList then refreshIconList() end
                 flashStatus(("Deleted: %s"):format(deletedName or "?"), C_WARN)
             else
                 flashStatus(err or "Delete failed.", C_ERROR)
@@ -645,8 +848,10 @@ local function buildEditorPanel()
     }
 
     deleteBtn:SetScript("OnClick", function()
-        local abs = ns.MacroAPI:AbsByBrowse(state.scope, state.browseIndex)
-        if not abs then flashStatus("Nothing to delete.", C_WARN); return end
+        if not state.editingAbsSlot then
+            flashStatus("Load a macro from the right strip first.", C_WARN); return
+        end
+        local abs = state.editingAbsSlot
         local name = GetMacroInfo(abs) or "?"
         local dialog = StaticPopup_Show("WSMB_CONFIRM_DELETE", name)
         if dialog then dialog.data = { abs = abs } end
@@ -655,7 +860,7 @@ local function buildEditorPanel()
     saveBtn:SetScript("OnClick", function()
         local name = nameEdit:GetText() or ""
         local body = editBox:GetText() or ""
-        local icon = WICKSMACROBUILDERDB.lastIcon or "INV_Misc_QuestionMark"
+        local icon = state.chosenIcon or DEFAULT_ICON
 
         if state.editingAbsSlot then
             local ok, err = ns.MacroAPI:EditAt(state.editingAbsSlot, name, icon, body)
@@ -663,7 +868,8 @@ local function buildEditorPanel()
                 WICKSMACROBUILDERDB.lastMacroName = name
                 WICKSMACROBUILDERDB.lastBody = body
                 WICKSMACROBUILDERDB.lastScope = state.scope
-                updatePickerLabel()
+                WICKSMACROBUILDERDB.lastIcon = icon
+                if refreshIconList then refreshIconList() end
                 flashStatus(("Saved changes to slot %d."):format(state.editingAbsSlot), C_GREEN)
             else
                 flashStatus(err or "Save failed.", C_ERROR)
@@ -674,16 +880,15 @@ local function buildEditorPanel()
                 WICKSMACROBUILDERDB.lastMacroName = name
                 WICKSMACROBUILDERDB.lastBody = body
                 WICKSMACROBUILDERDB.lastScope = state.scope
+                WICKSMACROBUILDERDB.lastIcon = icon
                 state.editingAbsSlot = newAbs
-                local landedScope, landedBrowse = ns.MacroAPI:BrowseOfAbs(newAbs)
-                if landedScope then
-                    state.scope = landedScope
-                    state.browseIndex = landedBrowse
-                    updateScopeVisuals()
-                end
-                updatePickerLabel()
+                -- If CreateMacro landed in a different scope than expected, snap.
+                local landedScope = ns.MacroAPI:BrowseOfAbs(newAbs)
+                if landedScope then state.scope = landedScope end
                 updateModeHint()
-                flashStatus(("Created new macro at slot %d."):format(newAbs), C_GREEN)
+                if frame.updateScopeVisuals then frame.updateScopeVisuals() end
+                if refreshIconList then refreshIconList() end
+                flashStatus(("Created new macro at slot %d. Drag the icon on the right onto an action bar."):format(newAbs), C_GREEN)
             else
                 flashStatus(err or "Save failed.", C_ERROR)
             end
@@ -707,9 +912,9 @@ function UI:Build()
     frame:SetMovable(true)
     frame:SetResizable(true)
     if frame.SetResizeBounds then
-        frame:SetResizeBounds(FRAME_W, FRAME_H)        -- modern API (10.x)
+        frame:SetResizeBounds(FRAME_W, FRAME_H)
     elseif frame.SetMinResize then
-        frame:SetMinResize(FRAME_W, FRAME_H)            -- classic API
+        frame:SetMinResize(FRAME_W, FRAME_H)
     end
     frame:EnableMouse(true)
     frame:SetFrameStrata("DIALOG")
@@ -719,8 +924,10 @@ function UI:Build()
     frame:SetScript("OnSizeChanged", function(self)
         WICKSMACROBUILDERDB.width  = self:GetWidth()
         WICKSMACROBUILDERDB.height = self:GetHeight()
-        if editBox then
-            editBox:SetWidth(self:GetWidth() - 2 * FRAME_PAD - 32)
+        -- editBox width tracks its scroll parent (which now grows with the
+        -- frame thanks to the BOTTOMRIGHT/-RIGHT_INSET anchor on editFrame).
+        if editBox and editScroll then
+            editBox:SetWidth(math.max(40, editScroll:GetWidth()))
         end
         if selectedSource then renderSource() end
     end)
@@ -768,26 +975,26 @@ function UI:Build()
     -- Editor + save panel at bottom
     buildEditorPanel()
 
-    -- Mode hint strip (sits just above the slot/scope row, below the editor)
-    frame.modeHint = newText(frame, 10, C_TEXT_DIM, "LEFT")
-    frame.modeHint:SetPoint("BOTTOMLEFT", FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H + SLOT_ROW_H)
-    frame.modeHint:SetPoint("BOTTOMRIGHT", -FRAME_PAD, EDITOR_BOTTOM + SAVE_ROW_H + SLOT_ROW_H)
-    frame.modeHint:SetText("No macro loaded — Save creates a new one.")
+    -- Icon strip on the right (must happen after buildEditorPanel so scope
+    -- buttons can reference flashStatus + the frame.update* helpers).
+    buildIconStrip()
 
-    -- Restore last scope before first render (affects picker label).
+    -- Restore last state
     state.scope = WICKSMACROBUILDERDB.lastScope or "global"
-    state.browseIndex = 1
     state.editingAbsSlot = nil
+    state.chosenIcon = WICKSMACROBUILDERDB.lastIcon or DEFAULT_ICON
 
     -- Initial render
     refreshTabVisuals()
     renderSource()
-    frame.updateScopeVisuals()
+    if frame.updateScopeVisuals then frame.updateScopeVisuals() end
     frame.updateModeHint()
+    frame.updateCurrentIconBtn()
+    refreshIconList()
     updateCharCount()
 
-    -- Restore last-edited body into the editor as a convenience; Save will
-    -- create a new macro (editingAbsSlot is nil on fresh load).
+    -- Restore last-edited body into the editor (editingAbsSlot stays nil so
+    -- Save creates a new macro — the body is a convenience, not an auto-link).
     if WICKSMACROBUILDERDB.lastMacroName then frame.nameEdit:SetText(WICKSMACROBUILDERDB.lastMacroName) end
     if WICKSMACROBUILDERDB.lastBody then
         frame.editBox:SetText(WICKSMACROBUILDERDB.lastBody)
@@ -804,6 +1011,7 @@ function UI:Build()
         if btn == "LeftButton" then frame:StartSizing("BOTTOMRIGHT") end
     end)
     grip:SetScript("OnMouseUp", function() frame:StopMovingOrSizing() end)
+    grip:SetFrameLevel(frame:GetFrameLevel() + 10)   -- above the icon strip
 
     addCorners(frame, grip)
 
@@ -818,8 +1026,10 @@ end
 
 function UI:Toggle()
     if not frame then self:Build() end
-    if frame:IsShown() then frame:Hide() else
-        if frame.updatePickerLabel then frame.updatePickerLabel() end
+    if frame:IsShown() then
+        frame:Hide()
+    else
+        if refreshIconList then refreshIconList() end
         frame:Show()
     end
 end
