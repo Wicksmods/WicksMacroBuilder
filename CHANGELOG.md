@@ -1,5 +1,20 @@
 # Wick's Macro Builder — Changelog
 
+## 0.2.0 — 2026-04-22
+
+### Icon strip + drag-to-bar + icon picker
+
+Major UX rework. Instead of saving to a numbered slot and then switching to Blizzard's macro UI to drag a macro onto your action bars, you can now drag macros straight from Wick's Macro Builder.
+
+- **Icon strip on the right side** — vertical scrollable column showing every macro in the currently-selected scope, with its real icon and a fel-green highlight on the macro that's loaded in the editor.
+- **Drag to action bar** — left-drag any icon in the strip onto any action-bar slot. Uses `PickupMacro` under the hood. Blocked in combat with a status message.
+- **Click to load** — left-click an icon in the strip to load that macro into the editor (replaces the old `Load from Slot` button).
+- **Icon picker** — click the new `?` button next to the Name field to open a popup grid of every macro-eligible icon (`GetMacroIcons` + `GetMacroItemIcons`). Pick one and it's saved with the macro.
+- **Scope toggle moved** into the top of the icon strip (`Global` / `Char` buttons).
+- **Removed** the numbered slot picker (`◄ N/M ►`) and the `Load from Slot` button — icon-based interaction replaces both.
+- **Responsive layout** — chips, preset rows, editor, name row, save row, and mode hint all reflow when you resize the frame (BOTTOMRIGHT fel-green bracket is still the grip).
+- **Delete** now confirms before removing a macro (StaticPopup) and operates on whichever macro is currently loaded.
+
 ## 0.1.0 — 2026-04-22
 
 ### Initial release
