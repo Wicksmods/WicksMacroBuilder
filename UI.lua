@@ -25,7 +25,7 @@ local C_ERROR        = { 0.95, 0.35, 0.35, 1 }
 local CLASS_COLORS = RAID_CLASS_COLORS
 
 local BRACKET        = 10
-local HEADER_H       = 22
+local HEADER_H       = 32
 local TAB_H          = 22
 local FRAME_W        = 580
 local FRAME_H        = 510
@@ -936,20 +936,59 @@ function UI:Build()
     local bg = newTex(frame, "BACKGROUND", C_BG); bg:SetAllPoints()
     addBorder(frame)
 
-    -- Header
-    local header = newTex(frame, "ARTWORK", C_HEADER_BG)
-    header:SetPoint("TOPLEFT",  1, -1); header:SetPoint("TOPRIGHT", -1, -1); header:SetHeight(HEADER_H)
-    local headerSep = newTex(frame, "ARTWORK", C_BORDER)
-    headerSep:SetPoint("TOPLEFT",  1, -HEADER_H - 1); headerSep:SetPoint("TOPRIGHT", -1, -HEADER_H - 1); headerSep:SetHeight(1)
+    -- ---- HEADER ----
+    local header = CreateFrame("Frame", nil, frame)
+    header:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -1)
+    header:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -1, -1)
+    header:SetHeight(HEADER_H)
 
-    local title = newText(frame, 12, C_TEXT_NORMAL); title:SetPoint("LEFT", frame, "TOPLEFT", 10, -HEADER_H / 2)
-    title:SetText("Wick's Macro Builder")
+    local headerBG = newTex(header, "BACKGROUND", C_HEADER_BG)
+    headerBG:SetAllPoints()
 
-    local closeBtn = CreateFrame("Button", nil, frame)
-    closeBtn:SetSize(HEADER_H - 4, HEADER_H - 4)
-    closeBtn:SetPoint("RIGHT", frame, "TOPRIGHT", -4, -HEADER_H / 2)
-    local closeText = newText(closeBtn, 14, C_TEXT_NORMAL); closeText:SetPoint("CENTER"); closeText:SetText("×")
+    -- Green underline on header
+    local headerLine = newTex(header, "BORDER")
+    headerLine:SetColorTexture(C_GREEN[1], C_GREEN[2], C_GREEN[3], 0.35)
+    headerLine:SetPoint("BOTTOMLEFT", header, "BOTTOMLEFT", 40, 0)
+    headerLine:SetPoint("BOTTOMRIGHT", header, "BOTTOMRIGHT", -40, 0)
+    headerLine:SetHeight(1)
+
+    -- Header bottom border
+    local headerBotBorder = newTex(header, "BORDER", C_BORDER)
+    headerBotBorder:SetPoint("BOTTOMLEFT", header, "BOTTOMLEFT", 0, 0)
+    headerBotBorder:SetPoint("BOTTOMRIGHT", header, "BOTTOMRIGHT", 0, 0)
+    headerBotBorder:SetHeight(1)
+
+    -- Title (two-tone)
+    local title = header:CreateFontString(nil, "OVERLAY")
+    title:SetFont("Fonts\\FRIZQT__.TTF", 14, "OUTLINE")
+    title:SetText("|cff4FC778Wick's|r |cffD4C8A1Macro Builder|r")
+    title:SetPoint("LEFT", header, "LEFT", 12, 0)
+
+    -- Close button
+    local closeBtn = CreateFrame("Button", nil, header)
+    closeBtn:SetSize(16, 16)
+    closeBtn:SetPoint("RIGHT", header, "RIGHT", -8, 0)
+
+    local closeBG = newTex(closeBtn, "BACKGROUND", C_HEADER_BG)
+    closeBG:SetAllPoints()
+    addInnerBorder(closeBtn)
+
+    local closeText = closeBtn:CreateFontString(nil, "OVERLAY")
+    closeText:SetFont("Fonts\\FRIZQT__.TTF", 9, "")
+    closeText:SetText("✕")
+    closeText:SetTextColor(C_TEXT_DIM[1], C_TEXT_DIM[2], C_TEXT_DIM[3], 1)
+    closeText:SetAllPoints()
+    closeText:SetJustifyH("CENTER")
+    closeText:SetJustifyV("MIDDLE")
+    closeBtn:SetScript("OnEnter", function() closeText:SetTextColor(1, 0.3, 0.3, 1) end)
+    closeBtn:SetScript("OnLeave", function() closeText:SetTextColor(C_TEXT_DIM[1], C_TEXT_DIM[2], C_TEXT_DIM[3], 1) end)
     closeBtn:SetScript("OnClick", function() frame:Hide() end)
+
+    -- Make header draggable too
+    header:EnableMouse(true)
+    header:RegisterForDrag("LeftButton")
+    header:SetScript("OnDragStart", function() frame:StartMoving() end)
+    header:SetScript("OnDragStop", function() frame:StopMovingOrSizing() end)
 
     -- Tab strip: 10 tabs, 5 per row
     for i, source in ipairs(SOURCES) do

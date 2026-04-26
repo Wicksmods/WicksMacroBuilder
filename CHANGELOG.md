@@ -1,5 +1,13 @@
 # Wick's Macro Builder — Changelog
 
+## 0.2.1 — 2026-04-25
+
+### Title bar harmonization
+
+Header now matches the canonical Wick suite spec — taller (32px), two-tone title (`Wick's` in fel-green, `Macro Builder` in cream, FRIZQT 14 outlined), bordered ✕ close button, fel-green underline at the bottom of the header, drag-by-header.
+
+No functional changes.
+
 ## 0.2.0 — 2026-04-22
 
 ### Icon strip + drag-to-bar + icon picker
