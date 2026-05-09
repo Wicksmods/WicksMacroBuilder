@@ -4,7 +4,7 @@
 
 > A clean macro editor for TBC Classic. Build your macro with click-to-insert chips, pick an icon, then drag it straight onto your action bars. No switching to Blizzard's macro window.
 
-Part of the **[Wick suite](https://github.com/Wicksmods/WickSuite)**: precision TBC Classic addons with a shared fel-green-on-deep-purple aesthetic.
+Part of the **[Wick suite](https://github.com/Wicksmods/WickSuite)**: precision addons built around a single fel-green-on-deep-purple aesthetic.
 
 <!-- wick:suite-table:start -->
 | Addon | GitHub | CurseForge |

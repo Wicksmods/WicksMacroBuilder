@@ -1,6 +1,6 @@
 # Wick's Macro Builder — Changelog
 
-## 0.2.2 — 2026-04-26
+## 0.2.2 - 2026-04-26
 
 ### Title bar slim revert + close-button glyph fix
 
@@ -10,7 +10,7 @@ Also: the previous `✕` (U+2715) close glyph was rendering as a tofu/missing-gl
 
 No functional changes.
 
-## 0.2.1 — 2026-04-25
+## 0.2.1 - 2026-04-25
 
 ### Title bar harmonization
 
@@ -18,7 +18,7 @@ Header now matches the canonical Wick suite spec — taller (32px), two-tone tit
 
 No functional changes.
 
-## 0.2.0 — 2026-04-22
+## 0.2.0 - 2026-04-22
 
 ### Icon strip + drag-to-bar + icon picker
 
@@ -33,7 +33,7 @@ Major UX rework. Instead of saving to a numbered slot and then switching to Bliz
 - **Responsive layout** — chips, preset rows, editor, name row, save row, and mode hint all reflow when you resize the frame (BOTTOMRIGHT fel-green bracket is still the grip).
 - **Delete** now confirms before removing a macro (StaticPopup) and operates on whichever macro is currently loaded.
 
-## 0.1.0 — 2026-04-22
+## 0.1.0 - 2026-04-22
 
 ### Initial release
 
